@@ -42,3 +42,18 @@ def test_employee_pagination_rejects_invalid_page():
     response = client.get("/employees?page=0&page_size=2")
 
     assert response.status_code == 422
+def test_employee_monthly_explain_uses_full_aggregation():
+    response = client.get(
+        "/admin/explain/employee_monthly",
+        params={"emp_code": "EMP0001", "month": "2026-10"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["endpoint"] == "employee_monthly"
+    assert data["collection"] == "attendance_logs"
+
+    pipeline = data["explain"]["command"]["pipeline"]
+    stages = {next(iter(stage)) for stage in pipeline}
+
+    assert "$group" in stages

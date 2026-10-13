@@ -1,86 +1,69 @@
-# Employee Attendance & Analytics API
+# Code Review — Employee Attendance & Analytics API
 
-A REST API built with FastAPI and MongoDB for employee management, attendance tracking, attendance corrections, and analytics.
+## Review scope and evidence
 
-## Features
+The review focused on API validation, attendance calculations, concurrency, analytics, query plans, and date-range handling.
 
-- Employee creation and paginated employee listing.
-- Attendance punch-in and punch-out.
-- Attendance listing with filters and pagination.
-- Attendance corrections with an audit history.
-- Monthly employee analytics and department summaries.
-- Late-arrival leaderboard and department attendance trends.
-- MongoDB query execution statistics through the admin explain endpoint.
-- Input validation, duplicate protection, and database indexes.
+**Review limitation:** The original starter version of `app/main.py` could not be recovered from the available Git history. Therefore, the findings below describe issues verified in the available implementation and do not claim to be a complete reconstruction of every original starter defect.
 
-## Requirements
+## Findings
 
-- Python 3.11 or newer
-- MongoDB 6.0 or newer
-- Dependencies listed in `requirements.txt`
+### 1. Attendance-list explain filters did not match the API
 
-## Setup
+- **Where:** `explain_endpoint`, `attendance_list` branch.
+- **What is wrong:** The explain route did not reject invalid date ranges or unsupported attendance statuses. It also used a truthiness check for `emp_code`, unlike the list endpoint's explicit `None` check.
+- **How to notice:** Compare `/attendance` and `/admin/explain/attendance_list` using the same filters, including an invalid date range or status.
+- **How fixed:** Added matching date-range and status validation and used an explicit `emp_code is not None` check.
 
-Create and activate a virtual environment:
+### 2. Department-trend explain accepted an oversized date range
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-```
+- **Where:** `explain_endpoint`, `department_trend` branch.
+- **What is wrong:** The maximum range check counted the difference between dates, not the number of calendar days. This allowed a 93-day inclusive range.
+- **How to notice:** Request a range from `2026-01-01` through `2026-04-03`.
+- **How fixed:** Validate `(date_end - date_start).days + 1 > 92`.
 
-Install dependencies:
+### 3. Department-trend explain counted half-days incorrectly
 
-```bash
-python -m pip install -r requirements.txt
-```
+- **Where:** The `$group` stage in the department-trend explain pipeline.
+- **What is wrong:** Every presence record contributed `1`, including half-day records.
+- **How to notice:** Explain a range containing a `PRESENT`, `WFH`, or `ON_DUTY` record with `half_day: true`.
+- **How fixed:** Count half-day records as `0.5` and other presence records as `1`.
 
-Configure a `.env` file in the project root:
+### 4. Department-trend explain used inconsistent attendance-rate semantics
 
-```env
-MONGO_URI=mongodb://127.0.0.1:27017
-MONGO_DB=attendance_db
-```
+- **Where:** The `attendance_rate` stage in the department-trend explain pipeline.
+- **What is wrong:** The rate was multiplied by `100` and returned `0` on weekends or when headcount was zero. The actual endpoint returns a fraction and uses `null` when the rate is undefined.
+- **How to notice:** Compare the endpoint and explain pipelines for a weekday, weekend, or date with zero headcount.
+- **How fixed:** Use `present_count / headcount` on working days with positive headcount; otherwise return `null`.
 
-Ensure MongoDB is running, then load the provided sample data:
+### 5. Department-trend explain used different date bounds
 
-```bash
-python sample_seed.py
-```
+- **Where:** The `$densify` stage in the department-trend explain pipeline.
+- **What is wrong:** The upper bound did not extend to the day after the requested end date, unlike the actual trend pipeline's exclusive upper bound.
+- **How to notice:** Request a short date range and compare the generated date boundaries with the actual endpoint.
+- **How fixed:** Use UTC-aware bounds from the start date through midnight after the end date.
 
-**Note:** The seed script reloads the sample collections. Use it only when you intend to reset the sample data.
+## Additional behavior checked
 
-Start the API:
+- **Duplicate employee and attendance records:** Unique indexes enforce employee-code and employee/date uniqueness.
+- **Concurrent punch-out:** The update filters for `punch_out: None`, so only one request can complete the punch-out successfully.
+- **Concurrent regularization:** The update compares the existing history before applying a correction, preventing a concurrent update from silently overwriting another correction.
+- **Leaderboard ties:** `$rank` preserves ties and the final sort makes the returned order deterministic.
+- **Department headcount:** The summary begins with eligible employees, allowing employees without attendance logs to contribute to headcount.
+- **Time rules:** Automated tests cover time calculations and half-day behavior.
 
-```bash
-uvicorn app.main:app --reload --port 8000
-```
+These are checks of the available implementation. They should not be interpreted as proof that every behavior was correct in the original starter.
 
-## API documentation
+## Verification
 
-- Swagger UI: http://127.0.0.1:8000/docs
-- Health check: http://127.0.0.1:8000/health
-
-## Tests
-
-Run the automated tests:
+Latest verified test command:
 
 ```bash
-python -m pytest -q
+MONGO_DB=attendance_test_db python -m pytest -q
 ```
 
-The current local test suite contains 11 tests. Run the suite again after making changes.
+Result: **24 passed**, with three deprecation warnings.
 
-## Project files
+The warnings concern the current FastAPI startup-event API and the installed Starlette test-client integration. They did not cause test failures.
 
-- `app/main.py` — API implementation
-- `openapi.yaml` — API contract and business rules
-- `DATA_MODEL.md` — MongoDB data model
-- `sample_data/` — sample employee and attendance records
-- `sample_seed.py` — sample data loader
-- `tests/` — automated tests
-- `REVIEW.md` — review of starter-code defects
-- `DECISIONS.md` — implementation decisions
-
-## Security
-
-Do not commit `.env`, database credentials, API keys, or other secrets. The `.gitignore` file excludes `.env` and the local virtual environment.
+The department-trend tests also passed independently. Query-plan claims should be supported by the actual output of `/admin/explain/{endpoint}` against the benchmark dataset rather than assumed from the index definitions alone.
